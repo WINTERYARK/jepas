@@ -7,6 +7,7 @@ from torch.utils.data import DataLoader
 from configs import get_image_dataset_config
 
 from .image_dataset import ImageDataset
+from .hf_image_datamodule import HFImageDataModule
 
 dataset_config = get_image_dataset_config()
 
@@ -103,6 +104,20 @@ class ImageDataModule(pl.LightningDataModule):
 def create_image_datamodule(image_config: Dict[str, Any]) -> ImageDataModule:
     _dataset_config: Dict[str, Any] = image_config["dataset"]
     experiment_config: Dict[str, Any] = image_config["experiment"]
+
+    if _dataset_config.get("HF_DATASET_ID"):
+        return HFImageDataModule(
+            dataset_id=_dataset_config["HF_DATASET_ID"],
+            subset_name=_dataset_config.get("HF_DATASET_NAME"),
+            train_split=_dataset_config.get("HF_TRAIN_SPLIT", "train"),
+            val_split=_dataset_config.get("HF_VAL_SPLIT", "val"),
+            batch_size=experiment_config["BATCH_SIZE"],
+            num_workers=experiment_config["NUM_WORKERS"],
+            pin_memory=experiment_config["PIN_MEMORY"],
+            persistent_workers=experiment_config["PERSISTENT_WORKERS"],
+            prefetch_factor=experiment_config["PREFETCH_FACTOR"],
+            shuffle=_dataset_config["SHUFFLE_DATASET"],
+        )
 
     return ImageDataModule(
         dataset_path=_dataset_config["DATASET_PATH"],
