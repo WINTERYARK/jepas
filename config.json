@@ -10,7 +10,11 @@
             "LAYER_DROPOUT": 0.1
         },
         "dataset": {
-            "DATASET_PATH": "./data/image/imagenet/imagenet-object-localization-challenge/ILSVRC/Data/CLS-LOC",
+            "DATASET_PATH": null,
+            "HF_DATASET_ID": "PKU-Alignment/Align-Anything",
+            "HF_DATASET_NAME": "text-to-image",
+            "HF_TRAIN_SPLIT": "train",
+            "HF_VAL_SPLIT": "val",
             "ACCEPTABLE_FILE_EXTENSIONS": [".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG"],
             "SHUFFLE_DATASET": true,
             "transforms": {

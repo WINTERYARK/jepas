@@ -4,11 +4,17 @@ from pytorch_lightning.loggers import TensorBoardLogger
 
 from configs import (
     get_image_config,
+    get_image_dataset_config,
     get_image_experiment_config,
     get_image_runtime_config,
     get_image_tracking_config,
 )
-from jepa_datasets import ImageDataModule, create_image_datamodule
+from jepa_datasets import (
+    ImageDataModule,
+    HFImageDataModule,
+    create_image_datamodule,
+    create_hf_image_datamodule,
+)
 from model import IJEPA
 from model.image import ijepa_model_builders
 
@@ -55,7 +61,11 @@ if __name__ == "__main__":
     print(f"✅ Model loaded: {model_id}")
 
     # 2. Load dataset
-    datamodule: ImageDataModule = create_image_datamodule(image_config=image_config)
+    dataset_cfg = get_image_dataset_config()
+    if dataset_cfg.get("HF_DATASET_ID"):
+        datamodule: HFImageDataModule = create_hf_image_datamodule(image_config=image_config)
+    else:
+        datamodule: ImageDataModule = create_image_datamodule(image_config=image_config)
     print("✅ Dataset loaded")
 
     # 3. Callbacks
