@@ -1,6 +1,6 @@
 import torch
 from pytorch_lightning import Trainer
-from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
+from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint, EarlyStopping
 from pytorch_lightning.loggers import TensorBoardLogger
 
 # Assuming dataset and model are in a package named 'muilti_model'
@@ -10,17 +10,21 @@ from muilti_model.model import MultiModalJEPA
 
 def main():
     # ------------------------------------------------------------------
-    # Hyper-parameters (feel free to edit / expose as CLI arg if needed)
+    # Hyper-parameters
     # ------------------------------------------------------------------
-    MAX_EPOCHS = 10
-    BATCH_SIZE = 32
+    MAX_EPOCHS = 50
+    BATCH_SIZE = 128
     LR = 1e-4
-    MODEL_SIZE = "image_bert"
+    WEIGHT_DECAY = 1e-4
+    PROJECTION_DIM = 512
+    TEMPERATURE = 0.07
+    MSE_WEIGHT = 0.1
+    ACCUMULATE_GRAD_BATCHES = 2 # Increase effective batch size
+    SEED = 42
+
     LOG_DIR = "logs"
     CHECKPOINT_DIR = "checkpoints"
     NUM_WORKERS = 8
-    # --- NEW: Control streaming from here ---
-    USE_STREAMING = True 
 
     # ------------------------------------------------------------------
     # Instantiate datamodule & model
@@ -28,19 +32,29 @@ def main():
     dm = VQAMMDataModule(
         batch_size=BATCH_SIZE, 
         num_workers=NUM_WORKERS,
-        streaming=USE_STREAMING  # Pass the flag to the datamodule
+        seed=SEED,
     )
-    model = MultiModalJEPA(image_encoder_name=MODEL_SIZE, lr=LR)
+    model = MultiModalJEPA(
+        projection_dim=PROJECTION_DIM,
+        temperature=TEMPERATURE,
+        mse_weight=MSE_WEIGHT,
+        lr=LR,
+        weight_decay=WEIGHT_DECAY,
+    )
 
     # ------------------------------------------------------------------
     # Callbacks & trainer
     # ------------------------------------------------------------------
+    # Early stop based on validation loss
+    early_stopping = EarlyStopping(monitor="val_loss", patience=5, mode="min")
+
     callbacks = [
-        ModelCheckpoint(dirpath=CHECKPOINT_DIR, filename=MODEL_SIZE, save_top_k=1, monitor="val_loss", mode="min"),
+        ModelCheckpoint(dirpath=CHECKPOINT_DIR, filename="mm-jepa", save_top_k=1, monitor="val_loss", mode="min"),
         LearningRateMonitor(logging_interval="epoch"),
+        early_stopping,
     ]
 
-    logger = TensorBoardLogger(save_dir=LOG_DIR, name="MMJEPA", version=MODEL_SIZE)
+    logger = TensorBoardLogger(save_dir=LOG_DIR, name="MMJEPA", version="dual-encoder-pretrain")
 
     trainer = Trainer(
         max_epochs=MAX_EPOCHS,
@@ -49,6 +63,8 @@ def main():
         precision="16-mixed" if torch.cuda.is_available() else 32,
         callbacks=callbacks,
         logger=logger,
+        accumulate_grad_batches=ACCUMULATE_GRAD_BATCHES,
+        log_every_n_steps=10,
     )
 
     trainer.fit(model, dm)

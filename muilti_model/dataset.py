@@ -2,7 +2,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset, IterableDataset
 from torchvision import transforms
 import pytorch_lightning as pl
-from datasets import load_dataset
+from datasets import load_dataset, concatenate_datasets
 from transformers import AutoTokenizer
 
 class VQADataset(Dataset):
@@ -25,11 +25,14 @@ class VQADataset(Dataset):
         if self.image_transform:
             image = self.image_transform(image)
         question = sample["question"]
+        # For VQA, we might need answers later, but for pre-training, we only need image-question pairs.
+        # However, to ensure no leakage, we should probably keep track of the question_id and image_id if available.
+        # For now, let's assume the combination of (image, question) is unique.
         return {"image": image, "question": question}
 
 
 class VQAMMDataModule(pl.LightningDataModule):
-    """Downloads `lmms-lab/VQAv2` from HuggingFace, with support for streaming.
+    """Loads and splits the `lmms-lab/VQAv2` dataset from HuggingFace for pre-training.
     """
 
     def __init__(
@@ -40,7 +43,7 @@ class VQAMMDataModule(pl.LightningDataModule):
         batch_size: int = 32,
         num_workers: int = 4,
         max_text_length: int = 32,
-        streaming: bool = False,
+        seed: int = 42,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -53,62 +56,41 @@ class VQAMMDataModule(pl.LightningDataModule):
             ]
         )
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, use_fast=True)
+        self.rng = torch.Generator().manual_seed(self.hparams.seed)
 
-    def _wrap_streaming_dataset(self, hf_iterable_dataset):
-        """Wraps a HuggingFace iterable dataset in a PyTorch IterableDataset."""
-        class HFStreamWrapper(IterableDataset):
-            def __init__(self, hf_dataset, transform):
-                self.hf_dataset = hf_dataset
-                self.transform = transform
-
-            def __iter__(self):
-                for sample in self.hf_dataset:
-                    image = sample["image"]
-                    if image.mode != 'RGB':
-                        image = image.convert('RGB')
-                    transformed_image = self.transform(image)
-                    question = sample["question"]
-                    yield {"image": transformed_image, "question": question}
-        return HFStreamWrapper(hf_iterable_dataset, self.image_transform)
 
     def setup(self, stage=None):
-        # --- FIX: Changed split names to match the dataset ('validation' for train, 'test' for val) ---
-        train_split_name = 'validation'
-        val_split_name = 'test'
+        print("Setting up data...")
         
-        if self.hparams.streaming:
-            print(f"Setting up data in streaming mode. Using '{train_split_name}' for training.")
-            
-            # For streaming, we'll use the 'validation' split and reserve a part of it for our own validation
-            full_stream = load_dataset(self.hparams.hf_dataset_name, split=train_split_name, streaming=True)
-            
-            # Use the first 5000 samples for validation
-            val_stream = full_stream.take(5000)
-            self.val_dataset = self._wrap_streaming_dataset(val_stream)
-
-            # Use the rest of the stream for training
-            train_stream = full_stream.skip(5000)
-            self.train_dataset = self._wrap_streaming_dataset(train_stream)
-
+        # Load all available splits and concatenate them
+        dataset_dict = load_dataset(self.hparams.hf_dataset_name)
+        
+        # The VQAv2 dataset from lmms-lab has 'train', 'validation', and 'test' splits.
+        # We will concatenate them to create one large dataset before splitting.
+        all_splits = [split for split in dataset_dict.keys()]
+        print(f"Found splits: {all_splits}. Concatenating them.")
+        
+        # It's better to handle cases where some splits might be missing.
+        # Let's concatenate all available splits.
+        if len(all_splits) > 1:
+            full_dataset_hf = concatenate_datasets([dataset_dict[s] for s in all_splits])
         else:
-            print(f"Setting up data in download mode. Using '{train_split_name}' for training and '{val_split_name}' for validation.")
-            
-            dataset_dict = load_dataset(self.hparams.hf_dataset_name)
-            
-            # Use the 'validation' split as our training data
-            self.train_dataset = VQADataset(dataset_dict[train_split_name], self.image_transform)
-            
-            # Use the 'test' split as our validation data
-            try:
-                self.val_dataset = VQADataset(dataset_dict[val_split_name], self.image_transform)
-            except KeyError:
-                print(f"Warning: '{val_split_name}' split not found. Creating a validation set from the training data.")
-                lengths = len(self.train_dataset)
-                val_length = int(0.05 * lengths)
-                train_length = lengths - val_length
-                self.train_dataset, self.val_dataset = torch.utils.data.random_split(
-                    self.train_dataset, [train_length, val_length]
-                )
+            full_dataset_hf = dataset_dict[all_splits[0]]
+
+        full_dataset = VQADataset(full_dataset_hf, self.image_transform)
+        
+        # Split once: 80% train / 10% validation / 10% test
+        total_size = len(full_dataset)
+        train_size = int(0.8 * total_size)
+        val_size = int(0.1 * total_size)
+        test_size = total_size - train_size - val_size
+        
+        print(f"Total dataset size: {total_size}")
+        print(f"Splitting into train: {train_size}, val: {val_size}, test: {test_size}")
+
+        self.train_dataset, self.val_dataset, self.test_dataset = torch.utils.data.random_split(
+            full_dataset, [train_size, val_size, test_size], generator=self.rng
+        )
 
     def _collate_fn(self, batch):
         images = torch.stack([b["image"] for b in batch])
@@ -124,26 +106,35 @@ class VQAMMDataModule(pl.LightningDataModule):
             "pixel_values": images,
             "input_ids": tokenized.input_ids,
             "attention_mask": tokenized.attention_mask,
+            "questions": questions, # Pass raw questions for logging
         }
 
     def train_dataloader(self):
-        is_streaming = self.hparams.streaming
         return DataLoader(
             self.train_dataset,
             batch_size=self.hparams.batch_size,
-            shuffle=not is_streaming,
-            num_workers=0 if is_streaming else self.hparams.num_workers,
+            shuffle=True,
+            num_workers=self.hparams.num_workers,
             collate_fn=self._collate_fn,
             pin_memory=True,
         )
 
     def val_dataloader(self):
-        is_streaming = self.hparams.streaming
         return DataLoader(
             self.val_dataset,
             batch_size=self.hparams.batch_size,
             shuffle=False,
-            num_workers=0 if is_streaming else self.hparams.num_workers,
+            num_workers=self.hparams.num_workers,
+            collate_fn=self._collate_fn,
+            pin_memory=True,
+        )
+        
+    def test_dataloader(self):
+        return DataLoader(
+            self.test_dataset,
+            batch_size=self.hparams.batch_size,
+            shuffle=False,
+            num_workers=self.hparams.num_workers,
             collate_fn=self._collate_fn,
             pin_memory=True,
         )
